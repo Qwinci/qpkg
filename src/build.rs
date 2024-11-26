@@ -10,7 +10,11 @@ pub struct General {
 	pub src_unpack_dir: String,
 	pub workdir: String,
 	#[serde(default)]
+	pub binary_alternative: String,
+	#[serde(default)]
 	pub no_auto_patch: bool,
+	#[serde(default)]
+	pub no_auto_unpack: bool,
 	#[serde(default)]
 	pub recurse_submodules: bool,
 	#[serde(default)]

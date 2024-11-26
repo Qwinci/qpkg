@@ -11,6 +11,10 @@ use serde::Deserialize;
 use walkdir::WalkDir;
 use crate::build::Step;
 
+fn yes() -> bool {
+	true
+}
+
 #[derive(Deserialize)]
 struct GeneralConfig {
 	target: String,
@@ -21,23 +25,15 @@ struct GeneralConfig {
 	build_root: String,
 	#[serde(default)]
 	threads: usize,
+	#[serde(default = "yes")]
+	prefer_binaries: bool,
 	#[serde(flatten)]
 	others: HashMap<String, String>
 }
 
-fn default_cc() -> String {
-	"cc".to_string()
-}
-
-fn default_cxx() -> String {
-	"c++".to_string()
-}
-
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct BuildConfig {
-	#[serde(default = "default_cc")]
 	cc: String,
-	#[serde(default = "default_cxx")]
 	cxx: String,
 	#[serde(default)]
 	cflags: String,
@@ -47,6 +43,19 @@ struct BuildConfig {
 	ldflags: String,
 	#[serde(flatten)]
 	others: HashMap<String, String>
+}
+
+impl Default for BuildConfig {
+	fn default() -> Self {
+		Self {
+			cc: "cc".to_string(),
+			cxx: "c++".to_string(),
+			cflags: "".to_string(),
+			cxxflags: "".to_string(),
+			ldflags: "".to_string(),
+			others: HashMap::new()
+		}
+	}
 }
 
 #[derive(Deserialize)]
@@ -430,6 +439,16 @@ fn main() {
 			continue;
 		}
 
+		if config.general.prefer_binaries && !recipe.general.binary_alternative.is_empty() {
+			stack.push(Entry {
+				name: recipe.general.binary_alternative,
+				processed: false,
+				host: entry.host,
+				user_specified: entry.user_specified
+			});
+			continue;
+		}
+
 		if entry.host {
 			let path = std::path::absolute(Path::new(&config.general.build_root)
 				.join("host_pkgs")
@@ -594,42 +613,46 @@ fn main() {
 				std::fs::remove_dir_all(&root_src_dir).expect("failed to remove srcdir");
 				create_dir_all(&root_src_dir).expect("failed to create srcdir");
 
-				for src in &recipe.general.src {
-					let name = if let Some((_, name)) = src.rsplit_once('/') {
-						if let Some(str) = name.strip_suffix(".git") {
-							str
+				if !recipe.general.no_auto_unpack {
+					for src in &recipe.general.src {
+						let name = if let Some((_, name)) = src.rsplit_once('/') {
+							if let Some(str) = name.strip_suffix(".git") {
+								str
+							} else {
+								name
+							}
 						} else {
-							name
-						}
-					} else {
-						src.as_str()
-					};
+							src.as_str()
+						};
 
-					let path = if !recipe.general.src_unpack_dir.is_empty() {
-						Path::new(&recipe.general.src_unpack_dir).to_owned().join(name)
-					} else {
-						archives_dir.join(name)
-					}.canonicalize().expect("failed to canonicalize src path");
+						let path = if !recipe.general.src_unpack_dir.is_empty() {
+							Path::new(&recipe.general.src_unpack_dir).to_owned().join(name)
+						} else {
+							archives_dir.join(name)
+						}.canonicalize().expect("failed to canonicalize src path");
 
-					if src.ends_with(".tar.xz") ||
-						src.ends_with(".tar.gz") ||
-						src.ends_with(".tar.bz2") ||
-						src.ends_with(".tar.zst") {
-						let cmd = Command::new("tar")
-							.arg("-xf")
-							.arg(path.to_str().unwrap())
-							.current_dir(&root_src_dir)
-							.spawn().expect("failed to spawn tar")
-							.wait().expect("tar failed");
-						if !cmd.success() {
-							eprintln!("error: tar failed with {}", cmd);
-							exit(1);
+						if src.ends_with(".tar.xz") ||
+							src.ends_with(".tar.gz") ||
+							src.ends_with(".tar.bz2") ||
+							src.ends_with(".tar.zst") {
+							let cmd = Command::new("tar")
+								.arg("-xf")
+								.arg(path.to_str().unwrap())
+								.current_dir(&root_src_dir)
+								.spawn().expect("failed to spawn tar")
+								.wait().expect("tar failed");
+							if !cmd.success() {
+								eprintln!("error: tar failed with {}", cmd);
+								exit(1);
+							}
 						}
 					}
 				}
 
 				let work_dir = std::path::absolute(root_src_dir.join(&recipe.general.workdir))
 					.expect("failed to get absolute srcdir");
+
+				create_dir_all(&work_dir).ok();
 
 				let recipes_dir = if entry.host {
 					Path::new(&config.general.host_recipes_dir)

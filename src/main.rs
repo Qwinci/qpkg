@@ -806,19 +806,22 @@ fn main() {
 			}
 		}
 
+		let pkg_meta_dir = meta_dir.join(&entry.name);
+		let installed = read_to_string(pkg_meta_dir.join("FILES")).unwrap_or_default();
+
+		if !entry.user_specified && !installed.trim().is_empty() {
+			continue;
+		}
+
 		if !entry.host && (!entry.user_specified || do_sync) {
 			if !dest_dir.exists() {
 				eprintln!("error: dest dir {} doesn't exist", dest_dir.display());
 				exit(1);
 			}
 
-			let pkg_meta_dir = meta_dir.join(&entry.name);
-
 			let abs_dest_dir = dest_dir.canonicalize().expect("failed to canonizalize dest dir");
 
 			let mut files = String::new();
-
-			let installed = read_to_string(pkg_meta_dir.join("FILES")).unwrap_or_default();
 
 			let sysroot = Path::new(&config.general.sysroot);
 
@@ -873,7 +876,17 @@ fn main() {
 				match std::fs::remove_dir(&path) {
 					Ok(_) => {},
 					Err(e) => {
-						if e.kind() != std::io::ErrorKind::NotFound &&
+						if e.kind() == std::io::ErrorKind::NotADirectory {
+							match std::fs::remove_file(&path) {
+								Ok(_) => {},
+								Err(e) => {
+									if e.kind() != std::io::ErrorKind::NotFound {
+										eprintln!("error: failed to remove {}: {}", path.display(), e);
+										exit(1);
+									}
+								}
+							}
+						} else if e.kind() != std::io::ErrorKind::NotFound &&
 							e.kind() != std::io::ErrorKind::DirectoryNotEmpty {
 							eprintln!("error: failed to remove {}: {}", path.display(), e);
 							exit(1);

@@ -4,6 +4,7 @@ mod build;
 
 use std::collections::HashMap;
 use std::fs::{create_dir_all, read_to_string, write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{exit, Command};
 use aho_corasick::AhoCorasick;
@@ -63,7 +64,7 @@ struct Config {
 	general: GeneralConfig,
 	#[serde(default)]
 	host: BuildConfig,
-	build: BuildConfig
+	target: BuildConfig
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -337,19 +338,26 @@ fn main() {
 	let meta_dir = config.general.meta_dir.clone();
 	let meta_dir = Path::new(&meta_dir);
 
+	let abs_host_cc = which::which(&config.host.cc)
+		.expect("failed to find host cc in PATH");
+	let abs_host_cxx = which::which(&config.host.cxx)
+		.expect("failed to find host cxx in PATH");
+
 	let mut global_env = Vec::new();
-	global_env.push(("CC".to_string(), config.build.cc.clone()));
-	global_env.push(("CXX".to_string(), config.build.cxx.clone()));
-	if !config.build.cflags.is_empty() {
-		global_env.push(("CFLAGS".to_string(), config.build.cflags.clone()));
+	global_env.push(("CC".to_string(), config.target.cc.clone()));
+	global_env.push(("CXX".to_string(), config.target.cxx.clone()));
+	global_env.push(("QPKG_HOST_CC".to_string(), abs_host_cc.to_str().unwrap().to_string()));
+	global_env.push(("QPKG_HOST_CXX".to_string(), abs_host_cxx.to_str().unwrap().to_string()));
+	if !config.target.cflags.is_empty() {
+		global_env.push(("CFLAGS".to_string(), config.target.cflags.clone()));
 	}
-	if !config.build.cxxflags.is_empty() {
-		global_env.push(("CXXFLAGS".to_string(), config.build.cxxflags.clone()));
+	if !config.target.cxxflags.is_empty() {
+		global_env.push(("CXXFLAGS".to_string(), config.target.cxxflags.clone()));
 	}
-	if !config.build.ldflags.is_empty() {
-		global_env.push(("LDFLAGS".to_string(), config.build.ldflags.clone()));
+	if !config.target.ldflags.is_empty() {
+		global_env.push(("LDFLAGS".to_string(), config.target.ldflags.clone()));
 	}
-	for (name, value) in &config.build.others {
+	for (name, value) in &config.target.others {
 		global_env.push((name.clone(), value.clone()));
 	}
 
@@ -541,8 +549,8 @@ fn main() {
 
 		for src in &recipe.general.src {
 			let name = if let Some((_, name)) = src.rsplit_once('/') {
-				if let Some(str) = name.strip_suffix(".git") {
-					str
+				if let Some(pos) = name.find(".git") {
+					&name[0..pos]
 				} else {
 					name
 				}
@@ -557,12 +565,37 @@ fn main() {
 			};
 
 			if !path.exists() {
-				if src.ends_with(".git") {
-					println!("info: fetching {} using git", src);
+				if let Some(pos) = src.find(".git") {
+					let mut full = false;
+					let mut branch = "";
+
+					if pos + 4 != src.len() && &src[pos + 4..pos + 5] == ":" {
+						let opts = &src[pos + 5..];
+						if let Some(pos) = opts.find(",full") {
+							branch = &opts[0..pos];
+							full = true;
+						} else {
+							branch = opts;
+						}
+					}
+
+					println!("info: fetching {} using git", &src[0..pos]);
+
+					let branch_args = ["-b", branch];
 
 					let cmd = Command::new("git")
 						.arg("clone")
-						.arg(src.as_str())
+						.arg(&src[0..pos])
+						.args(if !full {
+							["--depth=1"].as_slice()
+						} else {
+							[].as_slice()
+						})
+						.args(if !branch.is_empty() {
+							branch_args.as_slice()
+						} else {
+							[].as_slice()
+						})
 						.args(if recipe.general.recurse_submodules {
 							["--recurse-submodules"].as_slice()
 						} else {
@@ -613,11 +646,14 @@ fn main() {
 				std::fs::remove_dir_all(&root_src_dir).expect("failed to remove srcdir");
 				create_dir_all(&root_src_dir).expect("failed to create srcdir");
 
+				let work_dir = std::path::absolute(root_src_dir.join(&recipe.general.workdir))
+					.expect("failed to get absolute srcdir");
+
 				if !recipe.general.no_auto_unpack {
 					for src in &recipe.general.src {
 						let name = if let Some((_, name)) = src.rsplit_once('/') {
-							if let Some(str) = name.strip_suffix(".git") {
-								str
+							if let Some(pos) = name.find(".git") {
+								&name[0..pos]
 							} else {
 								name
 							}
@@ -645,12 +681,20 @@ fn main() {
 								eprintln!("error: tar failed with {}", cmd);
 								exit(1);
 							}
+						} else if src.contains(".git") {
+							if let Err(err) = std::os::unix::fs::symlink(&path, &work_dir) {
+								if err.kind() != std::io::ErrorKind::AlreadyExists {
+									eprintln!(
+										"error: failed to symlink {} -> {}: {}",
+										path.display(),
+										work_dir.display(),
+										err);
+									exit(1);
+								}
+							}
 						}
 					}
 				}
-
-				let work_dir = std::path::absolute(root_src_dir.join(&recipe.general.workdir))
-					.expect("failed to get absolute srcdir");
 
 				create_dir_all(&work_dir).ok();
 
@@ -852,6 +896,17 @@ fn main() {
 						}
 					}
 				} else {
+					if full_path.exists() {
+						let mut perms = full_path
+							.metadata()
+							.expect("failed to query file metadata")
+							.permissions();
+						// owner/group write
+						perms.set_mode(perms.mode() | 0o220);
+						std::fs::set_permissions(&full_path, perms)
+							.expect("failed to set file permissions");
+					}
+
 					match std::fs::copy(file.path(), &full_path) {
 						Ok(_) => {},
 						Err(e) => {

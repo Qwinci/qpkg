@@ -1,0 +1,24 @@
+[general]
+target = "x86_64-unknown-linux-gnu"
+sysroot = "sysroot"
+recipes_dir = "recipes"
+host_recipes_dir = "host-recipes"
+meta_dir = "meta"
+build_root = "."
+threads = 18
+
+# config for the host machine (the machine that is running the build commands)
+[host]
+cc = "clang"
+cxx = "clang++"
+cflags = "-march=native -pipe"
+cxxflags = "-march=native -pipe"
+ldflags = "-fuse-ld=lld"
+
+# config for the build target (when building packages that are meant to run on `target`)
+[build]
+cc = "clang"
+cxx = "clang++"
+cflags = "-march=native -pipe"
+cxxflags = "-march=native -pipe"
+ldflags = "-fuse-ld=lld"

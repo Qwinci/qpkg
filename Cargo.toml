@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde = { version = "1.0.215", features = ["derive"] }
+serde = { version = "1.0.217", features = ["derive"] }
 toml = "0.8.19"
 aho-corasick = "1.1.3"
 walkdir = "2.5.0"
+which = "7.0.1"

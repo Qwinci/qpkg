@@ -84,9 +84,12 @@ op:
     build
     install
     sync
+
+    rebuild     equivalent to build install sync --force
 args:
     --force
     --host
+    --env=<name>=<value>
     --config=<path_to_qpkg.toml>");
 	exit(1);
 }
@@ -108,6 +111,11 @@ fn load_config(path: String) -> Config {
 						.expect("failed to get absolute config path");
 					config.general.build_root = abs.parent().unwrap().to_str().unwrap().to_string();
 				}
+
+				let abs = std::path::absolute(&config.general.build_root)
+					.expect("failed to get absolute build root path");
+				config.general.build_root = abs.to_str().unwrap().to_string();
+
 				config
 			},
 			Err(e) => {
@@ -132,6 +140,11 @@ fn load_config(path: String) -> Config {
 							.expect("failed to get absolute config path");
 						config.general.build_root = abs.parent().unwrap().to_str().unwrap().to_string();
 					}
+
+					let abs = std::path::absolute(&config.general.build_root)
+						.expect("failed to get absolute build root path");
+					config.general.build_root = abs.to_str().unwrap().to_string();
+
 					config
 				},
 				Err(e) => {
@@ -292,6 +305,8 @@ fn main() {
 	let mut names = Vec::new();
 	let mut config_path = String::new();
 
+	let mut global_env = Vec::new();
+
 	for arg in args {
 		if parsing_ops {
 			match arg.as_str() {
@@ -310,6 +325,14 @@ fn main() {
 				"--host" => host = true,
 				arg if arg.starts_with("--config=") => {
 					config_path = arg.strip_prefix("--config=").unwrap().to_string();
+				}
+				arg if arg.starts_with("--env=") => {
+					let (name, value) = arg
+						.strip_prefix("--env=")
+						.unwrap()
+						.split_once('=')
+						.unwrap();
+					global_env.push((name.to_string(), value.to_string()));
 				}
 				arg if arg.starts_with("-") => {
 					eprintln!("error: unsupported argument {}", arg);
@@ -343,9 +366,11 @@ fn main() {
 	let abs_host_cxx = which::which(&config.host.cxx)
 		.expect("failed to find host cxx in PATH");
 
-	let mut global_env = Vec::new();
-	global_env.push(("CC".to_string(), config.target.cc.clone()));
-	global_env.push(("CXX".to_string(), config.target.cxx.clone()));
+	let target_cc = config.target.cc.replace("@BUILDROOT@", &config.general.build_root);
+	let target_cxx = config.target.cc.replace("@BUILDROOT@", &config.general.build_root);
+
+	global_env.push(("CC".to_string(), target_cc));
+	global_env.push(("CXX".to_string(), target_cxx));
 	global_env.push(("QPKG_HOST_CC".to_string(), abs_host_cc.to_str().unwrap().to_string()));
 	global_env.push(("QPKG_HOST_CXX".to_string(), abs_host_cxx.to_str().unwrap().to_string()));
 	if !config.target.cflags.is_empty() {

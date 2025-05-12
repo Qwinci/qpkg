@@ -87,6 +87,7 @@ op:
     configure
     build
     install
+    remove
     sync
 
     rebuild     equivalent to build install sync --force
@@ -435,6 +436,7 @@ fn main() {
 	let mut parsing_ops = true;
 	let mut force = false;
 	let mut host = false;
+	let mut remove = false;
 	let mut ops = Vec::new();
 	let mut names = Vec::new();
 	let mut config_path = String::new();
@@ -454,6 +456,7 @@ fn main() {
 					force = true;
 				},
 				"install" => ops.push(Op::Install),
+				"remove" => remove = true,
 				"sync" => ops.push(Op::Sync),
 				"--force" => force = true,
 				"--host" => host = true,
@@ -481,10 +484,18 @@ fn main() {
 		}
 	}
 
-	if ops.is_empty() {
-		eprintln!("error: no ops specified");
-		exit(1);
+	if remove {
+		if !ops.is_empty() {
+			eprintln!("error: multiple operations specified with remove");
+			exit(1);
+		}
+	} else {
+		if ops.is_empty() {
+			eprintln!("error: no operations specified");
+			exit(1);
+		}
 	}
+
 	if names.is_empty() {
 		eprintln!("error: no packages specified");
 		exit(1);
@@ -508,6 +519,66 @@ fn main() {
 
 	let meta_dir = state.config.general.meta_dir.clone();
 	let meta_dir = Path::new(&meta_dir);
+
+	let sysroot = Path::new(&state.config.general.sysroot);
+
+	if remove {
+		for name in &names {
+			let pkg_meta_dir = meta_dir.join(name);
+			match pkg_meta_dir.try_exists() {
+				Ok(exists) => {
+					if exists {
+						println!("info: removing {}", name);
+					} else {
+						println!("info: package {} is not installed", name);
+						continue;
+					}
+				}
+				Err(e) => {
+					eprintln!("error: failed to determine if {} is installed: {}", name, e);
+					exit(1);
+				}
+			}
+	
+			let installed = read_to_string(pkg_meta_dir.join("FILES")).unwrap_or_default();
+
+			for name in installed.lines().rev() {
+				let name = name.trim();
+				if name.is_empty() {
+					continue;
+				}
+
+				let path = sysroot.join(name);
+				match std::fs::remove_dir(&path) {
+					Ok(_) => {},
+					Err(e) => {
+						if e.kind() == std::io::ErrorKind::NotADirectory {
+							match std::fs::remove_file(&path) {
+								Ok(_) => {},
+								Err(e) => {
+									if e.kind() != std::io::ErrorKind::NotFound {
+										eprintln!("error: failed to remove {}: {}", path.display(), e);
+										exit(1);
+									}
+								}
+							}
+						} else if e.kind() != std::io::ErrorKind::NotFound &&
+							e.kind() != std::io::ErrorKind::DirectoryNotEmpty {
+							eprintln!("error: failed to remove {}: {}", path.display(), e);
+							exit(1);
+						}
+					}
+				}
+			}
+
+			if let Err(e) = std::fs::remove_dir_all(&pkg_meta_dir) {
+				eprintln!("error: failed to remove {}: {}", pkg_meta_dir.display(), e);
+				exit(1);
+			}
+		}
+
+		return;
+	}
 
 	let abs_host_cc = which::which(&state.config.build.cc)
 		.expect("failed to find build cc in PATH");
@@ -1039,8 +1110,6 @@ fn main() {
 			let abs_dest_dir = dest_dir.canonicalize().expect("failed to canonizalize dest dir");
 
 			let mut files = String::new();
-
-			let sysroot = Path::new(&state.config.general.sysroot);
 
 			for file in WalkDir::new(&abs_dest_dir) {
 				let file = file.unwrap();

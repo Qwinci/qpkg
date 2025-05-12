@@ -22,7 +22,10 @@ pub struct General {
 	#[serde(default)]
 	pub depends: Vec<String>,
 	#[serde(default)]
-	pub host_depends: Vec<String>
+	pub host_depends: Vec<String>,
+	pub template: Option<String>,
+	#[serde(flatten)]
+	pub others: HashMap<String, String>
 }
 
 #[derive(Deserialize, Debug, Default)]

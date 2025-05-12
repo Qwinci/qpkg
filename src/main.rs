@@ -1,6 +1,7 @@
 #![feature(io_error_more)]
 
 mod build;
+mod template;
 
 use std::collections::HashMap;
 use std::fs::{create_dir_all, read_to_string, write};
@@ -9,8 +10,10 @@ use std::path::Path;
 use std::process::{exit, Command};
 use aho_corasick::AhoCorasick;
 use serde::Deserialize;
+use toml::Value;
 use walkdir::WalkDir;
 use crate::build::Step;
+use crate::template::{Template, Templates};
 
 fn yes() -> bool {
 	true
@@ -28,6 +31,7 @@ struct GeneralConfig {
 	threads: usize,
 	#[serde(default = "yes")]
 	prefer_binaries: bool,
+	templates_file: Option<String>,
 	#[serde(flatten)]
 	others: HashMap<String, String>
 }
@@ -63,7 +67,7 @@ impl Default for BuildConfig {
 struct Config {
 	general: GeneralConfig,
 	#[serde(default)]
-	host: BuildConfig,
+	build: BuildConfig,
 	target: BuildConfig
 }
 
@@ -94,7 +98,7 @@ args:
 	exit(1);
 }
 
-fn load_config(path: String) -> Config {
+fn load_config(path: String) -> (Config, String) {
 	if !path.is_empty() {
 		let data = match read_to_string(&path) {
 			Ok(data) => data,
@@ -116,7 +120,7 @@ fn load_config(path: String) -> Config {
 					.expect("failed to get absolute build root path");
 				config.general.build_root = abs.to_str().unwrap().to_string();
 
-				config
+				(config, path)
 			},
 			Err(e) => {
 				eprintln!("error: failed to parse config: {}", e);
@@ -145,7 +149,7 @@ fn load_config(path: String) -> Config {
 						.expect("failed to get absolute build root path");
 					config.general.build_root = abs.to_str().unwrap().to_string();
 
-					config
+					(config, path.to_string())
 				},
 				Err(e) => {
 					eprintln!("error: failed to parse config {}: {}", path, e);
@@ -156,6 +160,30 @@ fn load_config(path: String) -> Config {
 
 		eprintln!("error: failed to find qpkg.toml in the current directory or in /etc");
 		exit(1);
+	}
+}
+
+fn load_templates(config_path: &str, templates_file: &str) -> Templates {
+	let path = Path::new(config_path)
+		.parent()
+		.unwrap()
+		.join(templates_file);
+	let data = match read_to_string(&path) {
+		Ok(data) => data,
+		Err(e) => {
+			eprintln!("error: failed to read {}: {}", path.display(), e);
+			exit(1);
+		}
+	};
+
+	match toml::from_str::<Templates>(&data) {
+		Ok(templates) => {
+			templates
+		},
+		Err(e) => {
+			eprintln!("error: failed to parse template file {}: {}", templates_file, e);
+			exit(1);
+		}
 	}
 }
 
@@ -183,11 +211,85 @@ fn load_recipe(config: &Config, name: &str, host: bool) -> build::Recipe {
 	}
 }
 
+struct State {
+	config: Config,
+	templates: HashMap<String, Template>
+}
+
+impl State {
+	fn new(config: Config, templates: HashMap<String, Template>) -> Self {
+		Self {
+			config,
+			templates
+		}
+	}
+}
+
 fn finalize_recipe(
 	recipe: &mut build::Recipe,
-	config: &mut Config,
+	state: &State,
 	root_src_dir: &Path,
 	dest_dir: &Path) {
+	let mut template_replaces = &Vec::new();
+
+	if let Some(name) = &recipe.general.template {
+		let template = if let Some(template) = state.templates.get(name) {
+			template
+		} else {
+			eprintln!("error: use of undefined template {} in recipe for {}", name, recipe.general.name);
+			exit(1);
+		};
+
+		template_replaces = &template.opt_args;
+
+		recipe.general.depends.extend(template.depends.iter().cloned());
+		recipe.general.host_depends.extend(template.host_depends.iter().cloned());
+
+		recipe.prepare.args.extend(template.add_prepare.iter().cloned().map(|s| vec![s]));
+		recipe.configure.args.extend(template.add_configure.iter().cloned().map(|s| vec![s]));
+		recipe.build.args.extend(template.add_build.iter().cloned().map(|s| vec![s]));
+		recipe.install.args.extend(template.add_install.iter().cloned().map(|s| vec![s]));
+
+		recipe.prepare.env.extend(template.prepare_env.iter().cloned());
+		recipe.configure.env.extend(template.configure_env.iter().cloned());
+		recipe.build.env.extend(template.build_env.iter().cloned());
+		recipe.install.env.extend(template.install_env.iter().cloned());
+
+		let parse_template_args = |config: &Value, name: &str| {
+			if let Value::Array(array) = config {
+				array.iter().map(|value| if let Value::String(value) = value {
+					vec![value.clone()]
+				} else {
+					eprintln!("error: expected an array of strings in template step {}", name);
+					exit(1);
+				}).collect::<Vec<_>>()
+			} else {
+				eprintln!("error: expected an array of strings in template step {}", name);
+				exit(1);
+			}
+		};
+
+		let apply_template_step = |step: &mut Step, step_name: &str, template_name: &str| {
+			if !step.args.is_empty() || template_name.is_empty() {
+				return;
+			}
+
+			let config = if let Some(config) = template.others.get(template_name) {
+				config
+			} else {
+				eprintln!("error: default_{} specified an undefined key {}", step_name, template_name);
+				exit(1);
+			};
+
+			step.args.append(&mut parse_template_args(config, step_name));
+		};
+
+		apply_template_step(&mut recipe.prepare, "prepare", &template.default_prepare);
+		apply_template_step(&mut recipe.configure, "configure", &template.default_configure);
+		apply_template_step(&mut recipe.build, "build", &template.default_build);
+		apply_template_step(&mut recipe.install, "install", &template.default_install);
+	}
+
 	recipe.general.workdir = recipe.general.workdir.replace("@VERSION@", recipe.general.version.as_str());
 
 	let src_dir = if !recipe.general.src_unpack_dir.is_empty() {
@@ -199,17 +301,11 @@ fn finalize_recipe(
 	let dest_dir = std::path::absolute(dest_dir)
 		.expect("failed to get absolute destdir");
 
-	if config.general.threads == 0 {
-		config.general.threads = std::thread::available_parallelism()
-			.map(|num| num.get())
-			.unwrap_or(1);
-	}
+	let threads_str = state.config.general.threads.to_string();
 
-	let threads_str = config.general.threads.to_string();
-
-	let build_root_dir = std::path::absolute(&config.general.build_root)
+	let build_root_dir = std::path::absolute(&state.config.general.build_root)
 		.expect("failed to make build root absolute");
-	let sysroot_dir = std::path::absolute(&config.general.sysroot)
+	let sysroot_dir = std::path::absolute(&state.config.general.sysroot)
 		.expect("failed to make sysroot absolute");
 
 	let mut to_replace = Vec::from([
@@ -219,7 +315,8 @@ fn finalize_recipe(
 		"@DESTDIR@",
 		"@SYSROOT@",
 		"@TARGET@",
-		"@THREADS@"
+		"@THREADS@",
+		"\n"
 	]);
 	let mut replaces = Vec::from([
 		recipe.general.version.as_str(),
@@ -227,15 +324,28 @@ fn finalize_recipe(
 		src_dir.to_str().unwrap(),
 		dest_dir.to_str().unwrap(),
 		sysroot_dir.to_str().unwrap(),
-		config.general.target.as_str(),
-		threads_str.as_str()
+		state.config.general.target.as_str(),
+		threads_str.as_str(),
+		" "
 	]);
 
 	let mut to_replace_strings = Vec::new();
 
-	for (name, replace) in &config.general.others {
+	for (name, replace) in &state.config.general.others {
 		to_replace_strings.push(format!("@{}@", name.to_uppercase()));
 		replaces.push(replace);
+	}
+
+	for (name, replace) in &recipe.general.others {
+		to_replace_strings.push(format!("@{}@", name.to_uppercase()));
+		replaces.push(replace);
+	}
+
+	for name in template_replaces {
+		if !to_replace_strings.contains(name) {
+			to_replace_strings.push(name.clone());
+			replaces.push("");
+		}
 	}
 
 	for to_replace_string in &to_replace_strings {
@@ -248,20 +358,44 @@ fn finalize_recipe(
 		*src = aho.replace_all(&src, &replaces);
 	}
 
+	recipe.general.workdir = aho.replace_all(&recipe.general.workdir, &replaces);
+
 	for step in [
 		&mut recipe.prepare,
 		&mut recipe.configure,
 		&mut recipe.build,
 		&mut recipe.install] {
-		for list in &mut step.args {
-			for arg in list {
-				*arg = aho.replace_all(arg, &replaces);
+		loop {
+			let mut changed = false;
+			for list in &mut step.args {
+				for arg in list {
+					let result = aho.replace_all(arg.trim(), &replaces);
+					if *arg != result {
+						*arg = result;
+						changed = true;
+					}
+				}
+			}
+
+			if !changed {
+				break;
 			}
 		}
 
-		for env in &mut step.env {
-			for (_, value) in env {
-				*value = aho.replace_all(value, &replaces);
+		loop {
+			let mut changed = false;
+			for env in &mut step.env {
+				for (_, value) in env {
+					let result = aho.replace_all(value.trim(), &replaces);
+					if *value != result {
+						*value = result;
+						changed = true;
+					}
+				}
+			}
+
+			if !changed {
+				break;
 			}
 		}
 	}
@@ -356,47 +490,61 @@ fn main() {
 		exit(1);
 	}
 
-	let mut config = load_config(config_path);
+	let (mut config, config_path) = load_config(config_path);
 
-	let meta_dir = config.general.meta_dir.clone();
+	let templates = if let Some(path) = &config.general.templates_file {
+		load_templates(&config_path, path).templates
+	} else {
+		HashMap::new()
+	};
+
+	if config.general.threads == 0 {
+		config.general.threads = std::thread::available_parallelism()
+			.map(|num| num.get())
+			.unwrap_or(1);
+	}
+
+	let state = State::new(config, templates);
+
+	let meta_dir = state.config.general.meta_dir.clone();
 	let meta_dir = Path::new(&meta_dir);
 
-	let abs_host_cc = which::which(&config.host.cc)
-		.expect("failed to find host cc in PATH");
-	let abs_host_cxx = which::which(&config.host.cxx)
-		.expect("failed to find host cxx in PATH");
+	let abs_host_cc = which::which(&state.config.build.cc)
+		.expect("failed to find build cc in PATH");
+	let abs_host_cxx = which::which(&state.config.build.cxx)
+		.expect("failed to find build cxx in PATH");
 
-	let target_cc = config.target.cc.replace("@BUILDROOT@", &config.general.build_root);
-	let target_cxx = config.target.cc.replace("@BUILDROOT@", &config.general.build_root);
+	let target_cc = state.config.target.cc.replace("@BUILDROOT@", &state.config.general.build_root);
+	let target_cxx = state.config.target.cc.replace("@BUILDROOT@", &state.config.general.build_root);
 
 	global_env.push(("CC".to_string(), target_cc));
 	global_env.push(("CXX".to_string(), target_cxx));
 	global_env.push(("QPKG_HOST_CC".to_string(), abs_host_cc.to_str().unwrap().to_string()));
 	global_env.push(("QPKG_HOST_CXX".to_string(), abs_host_cxx.to_str().unwrap().to_string()));
-	if !config.target.cflags.is_empty() {
-		global_env.push(("CFLAGS".to_string(), config.target.cflags.clone()));
+	if !state.config.target.cflags.is_empty() {
+		global_env.push(("CFLAGS".to_string(), state.config.target.cflags.clone()));
 	}
-	if !config.target.cxxflags.is_empty() {
-		global_env.push(("CXXFLAGS".to_string(), config.target.cxxflags.clone()));
+	if !state.config.target.cxxflags.is_empty() {
+		global_env.push(("CXXFLAGS".to_string(), state.config.target.cxxflags.clone()));
 	}
-	if !config.target.ldflags.is_empty() {
-		global_env.push(("LDFLAGS".to_string(), config.target.ldflags.clone()));
+	if !state.config.target.ldflags.is_empty() {
+		global_env.push(("LDFLAGS".to_string(), state.config.target.ldflags.clone()));
 	}
-	for (name, value) in &config.target.others {
+	for (name, value) in &state.config.target.others {
 		global_env.push((name.clone(), value.clone()));
 	}
 
 	let mut global_host_env = Vec::new();
-	global_host_env.push(("CC".to_string(), config.host.cc.clone()));
-	global_host_env.push(("CXX".to_string(), config.host.cxx.clone()));
-	if !config.host.cflags.is_empty() {
-		global_host_env.push(("CFLAGS".to_string(), config.host.cflags.clone()));
+	global_host_env.push(("CC".to_string(), state.config.build.cc.clone()));
+	global_host_env.push(("CXX".to_string(), state.config.build.cxx.clone()));
+	if !state.config.build.cflags.is_empty() {
+		global_host_env.push(("CFLAGS".to_string(), state.config.build.cflags.clone()));
 	}
-	if !config.host.cxxflags.is_empty() {
-		global_host_env.push(("CXXFLAGS".to_string(), config.host.cxxflags.clone()));
+	if !state.config.build.cxxflags.is_empty() {
+		global_host_env.push(("CXXFLAGS".to_string(), state.config.build.cxxflags.clone()));
 	}
-	if !config.host.ldflags.is_empty() {
-		global_host_env.push(("LDFLAGS".to_string(), config.host.ldflags.clone()));
+	if !state.config.build.ldflags.is_empty() {
+		global_host_env.push(("LDFLAGS".to_string(), state.config.build.ldflags.clone()));
 	}
 
 	let mut force_prepare = false;
@@ -459,7 +607,7 @@ fn main() {
 	let mut aclocal = String::new();
 
 	while let Some(entry) = stack.pop() {
-		let mut recipe = load_recipe(&config, &entry.name, entry.host);
+		let mut recipe = load_recipe(&state.config, &entry.name, entry.host);
 
 		if !entry.processed {
 			stack.push(Entry { name: entry.name, processed: true, host: entry.host, user_specified: entry.user_specified });
@@ -472,7 +620,7 @@ fn main() {
 			continue;
 		}
 
-		if config.general.prefer_binaries && !recipe.general.binary_alternative.is_empty() {
+		if state.config.general.prefer_binaries && !recipe.general.binary_alternative.is_empty() {
 			stack.push(Entry {
 				name: recipe.general.binary_alternative,
 				processed: false,
@@ -483,7 +631,7 @@ fn main() {
 		}
 
 		if entry.host {
-			let path = std::path::absolute(Path::new(&config.general.build_root)
+			let path = std::path::absolute(Path::new(&state.config.general.build_root)
 				.join("host_pkgs")
 				.join(&entry.name))
 				.expect("failed to get absolute path for host dependency");
@@ -520,30 +668,30 @@ fn main() {
 			dest_dir,
 			root_src_dir
 		) = if entry.host {
-			let build_dir = Path::new(&config.general.build_root)
+			let build_dir = Path::new(&state.config.general.build_root)
 				.join("host_builds")
 				.join(&entry.name);
-			let dest_dir = Path::new(&config.general.build_root)
+			let dest_dir = Path::new(&state.config.general.build_root)
 				.join("host_pkgs")
 				.join(&entry.name);
-			let root_src_dir = Path::new(&config.general.build_root)
+			let root_src_dir = Path::new(&state.config.general.build_root)
 				.join("host_sources")
 				.join(&entry.name);
 			(build_dir, dest_dir, root_src_dir)
 		} else {
-			let build_dir = Path::new(&config.general.build_root)
+			let build_dir = Path::new(&state.config.general.build_root)
 				.join("pkg_builds")
 				.join(&entry.name);
-			let dest_dir = Path::new(&config.general.build_root)
+			let dest_dir = Path::new(&state.config.general.build_root)
 				.join("pkgs")
 				.join(&entry.name);
-			let root_src_dir = Path::new(&config.general.build_root)
+			let root_src_dir = Path::new(&state.config.general.build_root)
 				.join("sources")
 				.join(&entry.name);
 			(build_dir, dest_dir, root_src_dir)
 		};
 
-		let archives_dir = Path::new(&config.general.build_root)
+		let archives_dir = Path::new(&state.config.general.build_root)
 			.join("archives");
 
 		match create_dir_all(&root_src_dir) {
@@ -570,7 +718,7 @@ fn main() {
 			}
 		}
 
-		finalize_recipe(&mut recipe, &mut config, &root_src_dir, &dest_dir);
+		finalize_recipe(&mut recipe, &state, &root_src_dir, &dest_dir);
 
 		for src in &recipe.general.src {
 			let name = if let Some((_, name)) = src.rsplit_once('/') {
@@ -724,9 +872,9 @@ fn main() {
 				create_dir_all(&work_dir).ok();
 
 				let recipes_dir = if entry.host {
-					Path::new(&config.general.host_recipes_dir)
+					Path::new(&state.config.general.host_recipes_dir)
 				} else {
-					Path::new(&config.general.recipes_dir)
+					Path::new(&state.config.general.recipes_dir)
 				};
 
 				let patches_dir = std::path::absolute(recipes_dir
@@ -803,7 +951,7 @@ fn main() {
 				.map(|map| map.iter().next().unwrap())
 				.collect();
 
-			let sysroot_dir = std::path::absolute(&config.general.sysroot)
+			let sysroot_dir = std::path::absolute(&state.config.general.sysroot)
 				.expect("failed to make sysroot absolute");
 
 			for args in &step.args {
@@ -892,7 +1040,7 @@ fn main() {
 
 			let mut files = String::new();
 
-			let sysroot = Path::new(&config.general.sysroot);
+			let sysroot = Path::new(&state.config.general.sysroot);
 
 			for file in WalkDir::new(&abs_dest_dir) {
 				let file = file.unwrap();

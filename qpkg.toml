@@ -6,17 +6,18 @@ host_recipes_dir = "host-recipes"
 meta_dir = "meta"
 build_root = "."
 threads = 18
+templates_file = "helpers.toml"
 
-# config for the host machine (the machine that is running the build commands)
-[host]
+# config for the build machine (the machine that is running the build commands)
+[build]
 cc = "clang"
 cxx = "clang++"
 cflags = "-march=native -pipe"
 cxxflags = "-march=native -pipe"
 ldflags = "-fuse-ld=lld"
 
-# config for the build target (when building packages that are meant to run on `target`)
-[build]
+# config for the target machine (when building packages that are meant to run on `target`)
+[target]
 cc = "clang"
 cxx = "clang++"
 cflags = "-march=native -pipe"

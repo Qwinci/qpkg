@@ -19,6 +19,10 @@ fn yes() -> bool {
 	true
 }
 
+fn default_doc_dir() -> String {
+	"/usr/share/doc".to_string()
+}
+
 #[derive(Deserialize)]
 struct GeneralConfig {
 	target: String,
@@ -32,6 +36,12 @@ struct GeneralConfig {
 	#[serde(default = "yes")]
 	prefer_binaries: bool,
 	templates_file: Option<String>,
+	#[serde(default = "yes")]
+	strip_la_files: bool,
+	#[serde(default = "yes")]
+	strip_docs: bool,
+	#[serde(default = "default_doc_dir")]
+	doc_dir: String,
 	#[serde(flatten)]
 	others: HashMap<String, String>
 }
@@ -673,6 +683,8 @@ fn main() {
 		do_prepare = true;
 	}
 
+	let doc_path = Path::new(&state.config.general.doc_dir);
+
 	struct Entry {
 		name: String,
 		processed: bool,
@@ -1238,6 +1250,17 @@ fn main() {
 			for file in WalkDir::new(&abs_dest_dir) {
 				let file = file.unwrap();
 				let path = file.path().strip_prefix(&abs_dest_dir).unwrap();
+
+				if state.config.general.strip_la_files {
+					if path.extension().is_some_and(|ext| ext == "la") {
+						continue;
+					}
+				}
+				if state.config.general.strip_docs {
+					if path.starts_with(doc_path) {
+						continue;
+					}
+				}
 
 				let full_path = sysroot.join(path);
 

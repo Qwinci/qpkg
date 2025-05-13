@@ -99,7 +99,7 @@ op:
     install
     remove
     sync
-    gen-patch
+    gen-patch <patch name> <pattern_to_add>
 
     rebuild     equivalent to build install sync --force
 args:
@@ -450,6 +450,8 @@ fn main() {
 	let mut host = false;
 	let mut remove = false;
 	let mut gen_patch = false;
+	let mut gen_patch_name = "";
+	let mut gen_patch_pattern = "";
 	let mut dev = false;
 	let mut ops = Vec::new();
 	let mut names = Vec::new();
@@ -457,7 +459,9 @@ fn main() {
 
 	let mut global_env = Vec::new();
 
-	for arg in args {
+	let mut arg_i = 0;
+	while arg_i < args.len() {
+		let arg = &args[arg_i];
 		if parsing_ops {
 			match arg.as_str() {
 				"prepare" => ops.push(Op::Prepare),
@@ -472,7 +476,26 @@ fn main() {
 				"install" => ops.push(Op::Install),
 				"remove" => remove = true,
 				"sync" => ops.push(Op::Sync),
-				"gen-patch" => gen_patch = true,
+				"gen-patch" => {
+					if arg_i == args.len() - 1 {
+						eprintln!("error: gen-patch needs a patch name");
+						exit(1);
+					}
+					gen_patch_name = &args[arg_i + 1];
+					if gen_patch_name.is_empty() || gen_patch_name.contains("\t\n ") {
+						eprintln!("error: name given to gen-patch should not be empty or contain spaces");
+						exit(1);
+					}
+					arg_i += 1;
+					if arg_i == args.len() - 1 {
+						eprintln!("error: gen-patch needs a pattern to add");
+						exit(1);
+					}
+
+					gen_patch = true;
+					gen_patch_pattern = &args[arg_i + 1];
+					arg_i += 1;
+				},
 				"--force" => force = true,
 				"--host" => host = true,
 				"--dev" => dev = true,
@@ -496,8 +519,10 @@ fn main() {
 		}
 
 		if !parsing_ops {
-			names.push(arg);
+			names.push(arg.clone());
 		}
+
+		arg_i += 1;
 	}
 
 	if remove {
@@ -846,6 +871,7 @@ fn main() {
 
 			let output = Command::new("git")
 				.arg("diff")
+				.arg(&gen_patch_pattern)
 				.current_dir(work_dir)
 				.output()
 				.expect("failed to spawn git");
@@ -869,7 +895,7 @@ fn main() {
 				}
 			}
 
-			let patch_file = patches_dir.join("qpkg-generated.patch");
+			let patch_file = patches_dir.join(&format!("{}.patch", gen_patch_name));
 			match write(&patch_file, output.stdout) {
 				Ok(_) => {},
 				Err(e) => {
@@ -1080,7 +1106,7 @@ fn main() {
 						&["add", "."],
 						"error: failed to add files to git");
 					exec_git_cmd(
-						&["commit", "-m", "Initial commit"],
+						&["commit", "-m", "\"Initial commit\""],
 						"error: failed to make git commit");
 				}
 

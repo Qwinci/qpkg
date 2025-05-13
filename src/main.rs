@@ -89,12 +89,14 @@ op:
     install
     remove
     sync
+    gen-patch
 
     rebuild     equivalent to build install sync --force
 args:
     --force
     --host
     --env=<name>=<value>
+    --dev      initialize a git repository during prepare if one doesn't exist
     --config=<path_to_qpkg.toml>");
 	exit(1);
 }
@@ -437,6 +439,8 @@ fn main() {
 	let mut force = false;
 	let mut host = false;
 	let mut remove = false;
+	let mut gen_patch = false;
+	let mut dev = false;
 	let mut ops = Vec::new();
 	let mut names = Vec::new();
 	let mut config_path = String::new();
@@ -458,8 +462,10 @@ fn main() {
 				"install" => ops.push(Op::Install),
 				"remove" => remove = true,
 				"sync" => ops.push(Op::Sync),
+				"gen-patch" => gen_patch = true,
 				"--force" => force = true,
 				"--host" => host = true,
+				"--dev" => dev = true,
 				arg if arg.starts_with("--config=") => {
 					config_path = arg.strip_prefix("--config=").unwrap().to_string();
 				}
@@ -487,6 +493,11 @@ fn main() {
 	if remove {
 		if !ops.is_empty() {
 			eprintln!("error: multiple operations specified with remove");
+			exit(1);
+		}
+	} else if gen_patch {
+		if !ops.is_empty() {
+			eprintln!("error: multiple operations specified with gen-patch");
 			exit(1);
 		}
 	} else {
@@ -791,6 +802,51 @@ fn main() {
 
 		finalize_recipe(&mut recipe, &state, &root_src_dir, &dest_dir);
 
+		let work_dir = std::path::absolute(root_src_dir.join(&recipe.general.workdir))
+			.expect("failed to get absolute srcdir");
+		if gen_patch {
+			if !work_dir.join(".git").exists() {
+				eprintln!("error: gen-patch needs a git repository to work");
+				exit(1);
+			}
+
+			let output = Command::new("git")
+				.arg("diff")
+				.current_dir(work_dir)
+				.output()
+				.expect("failed to spawn git");
+
+			if !output.status.success() {
+				eprintln!("error: git failed with status {}", output.status);
+				exit(1);
+			}
+
+			let patches_dir = if host {
+				Path::new(&state.config.general.host_recipes_dir).join(&entry.name).join("patches")
+			} else {
+				Path::new(&state.config.general.recipes_dir).join(&entry.name).join("patches")
+			};
+
+			match create_dir_all(&patches_dir) {
+				Ok(_) => {},
+				Err(e) => {
+					eprintln!("error: failed to create directory {}: {}", patches_dir.display(), e);
+					exit(1);
+				}
+			}
+
+			let patch_file = patches_dir.join("qpkg-generated.patch");
+			match write(&patch_file, output.stdout) {
+				Ok(_) => {},
+				Err(e) => {
+					eprintln!("error: failed to write {}: {}", patch_file.display(), e);
+					exit(1);
+				}
+			}
+
+			continue;
+		}
+
 		for src in &recipe.general.src {
 			let name = if let Some((_, name)) = src.rsplit_once('/') {
 				if let Some(pos) = name.find(".git") {
@@ -890,9 +946,6 @@ fn main() {
 				std::fs::remove_dir_all(&root_src_dir).expect("failed to remove srcdir");
 				create_dir_all(&root_src_dir).expect("failed to create srcdir");
 
-				let work_dir = std::path::absolute(root_src_dir.join(&recipe.general.workdir))
-					.expect("failed to get absolute srcdir");
-
 				if !recipe.general.no_auto_unpack {
 					for src in &recipe.general.src {
 						let name = if let Some((_, name)) = src.rsplit_once('/') {
@@ -947,6 +1000,47 @@ fn main() {
 				} else {
 					Path::new(&state.config.general.recipes_dir)
 				};
+
+				if dev && !work_dir.join(".git").exists() {
+					let exec_git_cmd = |cmd: &[&str], msg: &str| {
+						let status = match Command::new("git")
+							.args(cmd)
+							.current_dir(&work_dir)
+							.spawn() {
+							Ok(mut child) => {
+								match child.wait() {
+									Ok(res) => res,
+									Err(e) => {
+										eprintln!("{}: {}", msg, e);
+										std::fs::remove_dir_all(work_dir.join(".git")).ok();
+										exit(1);
+									}
+								}
+							},
+							Err(e) => {
+								eprintln!("error: failed to spawn git: {}", e);
+								std::fs::remove_dir_all(work_dir.join(".git")).ok();
+								exit(1);
+							}
+						};
+
+						if !status.success() {
+							eprintln!("{}: {}", msg, status);
+							std::fs::remove_dir_all(work_dir.join(".git")).ok();
+							exit(1);
+						}
+					};
+
+					exec_git_cmd(
+						&["init", "-b", "main"],
+						"error: failed to initialize git repository");
+					exec_git_cmd(
+						&["add", "."],
+						"error: failed to add files to git");
+					exec_git_cmd(
+						&["commit", "-m", "Initial commit"],
+						"error: failed to make git commit");
+				}
 
 				let patches_dir = std::path::absolute(recipes_dir
 					.join(&entry.name)

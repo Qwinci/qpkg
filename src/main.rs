@@ -684,11 +684,20 @@ fn main() {
 		.map(|name| Entry { name, processed: false, host, user_specified: true })
 		.collect();
 
-	let existing_path = std::env::var("PATH").expect("no PATH set");
-	let mut new_path = String::new();
-	let mut aclocal = String::new();
+	let mut existing_path = std::env::var("PATH").expect("no PATH set");
+
+	struct Package {
+		path: String,
+		aclocal: String
+	}
+
+	let mut packages = HashMap::new();
 
 	while let Some(entry) = stack.pop() {
+		if packages.contains_key(&entry.name) {
+			continue;
+		}
+
 		let mut recipe = load_recipe(&state.config, &entry.name, entry.host);
 
 		if !entry.processed {
@@ -712,38 +721,51 @@ fn main() {
 			continue;
 		}
 
+		let mut package = Package {
+			path: String::new(),
+			aclocal: String::new()
+		};
+
 		if entry.host {
 			let path = std::path::absolute(Path::new(&state.config.general.build_root)
 				.join("host_pkgs")
 				.join(&entry.name))
-				.expect("failed to get absolute path for host dependency");
+				.expect("failed to get absolute path for host package");
 			for dir in ["bin", "usr/bin", "usr/local/bin"] {
-				if !new_path.ends_with(':') {
-					new_path.push(':');
+				if !package.path.ends_with(':') {
+					package.path += ":";
 				}
+				package.path += path.to_str().unwrap();
+				if !package.path.ends_with('/') {
+					package.path += "/";
+				}
+				package.path += dir;
+			}
 
-				new_path += path.to_str().unwrap();
-				if !new_path.ends_with('/') {
-					new_path.push('/');
+			if recipe.general.reexports_path {
+				if !existing_path.ends_with(':') {
+					existing_path += ":";
 				}
-				new_path += dir;
+				existing_path += &package.path;
 			}
 
 			if recipe.general.exports_aclocal {
 				for dir in ["share", "usr/share", "usr/local/share"] {
-					if !aclocal.ends_with(':') {
-						aclocal.push(':');
+					if !package.aclocal.ends_with(':') {
+						package.aclocal += ":";
 					}
 
-					aclocal += path.to_str().unwrap();
-					if !aclocal.ends_with('/') {
-						aclocal.push('/');
+					package.aclocal += path.to_str().unwrap();
+					if !package.aclocal.ends_with('/') {
+						package.aclocal += "/";
 					}
-					aclocal += dir;
-					aclocal += "/aclocal";
+					package.aclocal += dir;
+					package.aclocal += "/aclocal";
 				}
 			}
 		}
+
+		packages.insert(entry.name.clone(), package);
 
 		let (
 			build_dir,
@@ -924,6 +946,14 @@ fn main() {
 			}
 		}
 
+		let mut host_deps_path = String::new();
+		let mut aclocal = String::new();
+		for name in &recipe.general.host_depends {
+			let pkg = packages.get(name).expect("host dependency missing, this is a bug");
+			host_deps_path += &pkg.path;
+			aclocal += &pkg.aclocal;
+		}
+
 		if !entry.user_specified || do_prepare {
 			let prepared_path = root_src_dir.join("qpkg.prepared");
 
@@ -1085,7 +1115,7 @@ fn main() {
 						.map(|map| map.iter().next().unwrap())
 						.collect();
 
-					let real_path = new_path.clone() + ":" + &existing_path;
+					let real_path = host_deps_path.clone() + ":" + &existing_path;
 
 					let cmd = Command::new("/bin/sh")
 						.arg("-c")
@@ -1128,7 +1158,7 @@ fn main() {
 					&global_env
 				}.iter().map(|(name, value)| (name.as_str(), value.as_str()));
 
-				let real_path = new_path.clone() + ":" + &existing_path;
+				let real_path = host_deps_path.clone() + ":" + &existing_path;
 
 				let cmd = Command::new("/bin/sh")
 					.arg("-c")

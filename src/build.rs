@@ -20,6 +20,8 @@ pub struct General {
 	#[serde(default)]
 	pub exports_aclocal: bool,
 	#[serde(default)]
+	pub reexports_path: bool,
+	#[serde(default)]
 	pub depends: Vec<String>,
 	#[serde(default)]
 	pub host_depends: Vec<String>,

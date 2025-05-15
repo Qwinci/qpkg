@@ -112,6 +112,20 @@ args:
 }
 
 fn load_config(path: String) -> (Config, String) {
+	let finalize_config = |mut config: Config, path: &str| {
+		if matches!(config.general.build_root.as_str(), "" | ".") {
+			let abs = std::path::absolute(path)
+				.expect("failed to get absolute config path");
+			config.general.build_root = abs.parent().unwrap().to_str().unwrap().to_string();
+		}
+
+		let abs = std::path::absolute(&config.general.build_root)
+			.expect("failed to get absolute build root path");
+		config.general.build_root = abs.to_str().unwrap().to_string();
+
+		(config, path.to_string())
+	};
+
 	if !path.is_empty() {
 		let data = match read_to_string(&path) {
 			Ok(data) => data,
@@ -122,18 +136,8 @@ fn load_config(path: String) -> (Config, String) {
 		};
 
 		match toml::from_str::<Config>(&data) {
-			Ok(mut config) => {
-				if matches!(config.general.build_root.as_str(), "" | ".") {
-					let abs = std::path::absolute(&path)
-						.expect("failed to get absolute config path");
-					config.general.build_root = abs.parent().unwrap().to_str().unwrap().to_string();
-				}
-
-				let abs = std::path::absolute(&config.general.build_root)
-					.expect("failed to get absolute build root path");
-				config.general.build_root = abs.to_str().unwrap().to_string();
-
-				(config, path)
+			Ok(config) => {
+				finalize_config(config, &path)
 			},
 			Err(e) => {
 				eprintln!("error: failed to parse config: {}", e);
@@ -151,18 +155,8 @@ fn load_config(path: String) -> (Config, String) {
 			};
 
 			return match toml::from_str::<Config>(&data) {
-				Ok(mut config) => {
-					if matches!(config.general.build_root.as_str(), "" | ".") {
-						let abs = std::path::absolute(&path)
-							.expect("failed to get absolute config path");
-						config.general.build_root = abs.parent().unwrap().to_str().unwrap().to_string();
-					}
-
-					let abs = std::path::absolute(&config.general.build_root)
-						.expect("failed to get absolute build root path");
-					config.general.build_root = abs.to_str().unwrap().to_string();
-
-					(config, path.to_string())
+				Ok(config) => {
+					finalize_config(config, path)
 				},
 				Err(e) => {
 					eprintln!("error: failed to parse config {}: {}", path, e);
@@ -438,6 +432,43 @@ fn remove_file(path: impl AsRef<Path>) {
 	}
 }
 
+fn remove_path(path: impl AsRef<Path>) {
+	match std::fs::remove_dir(path.as_ref()) {
+		Ok(_) => {},
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotADirectory {
+				remove_file(path.as_ref());
+			} else if e.kind() != std::io::ErrorKind::NotFound &&
+				e.kind() != std::io::ErrorKind::DirectoryNotEmpty {
+				eprintln!("error: failed to remove {}: {}", path.as_ref().display(), e);
+				exit(1);
+			}
+		}
+	}
+}
+
+fn create_dir(path: impl AsRef<Path>) {
+	match create_dir_all(path.as_ref()) {
+		Ok(_) => {},
+		Err(e) => {
+			eprintln!("error: failed to create directory {}: {}", path.as_ref().display(), e);
+			exit(1);
+		}
+	}
+}
+
+fn source_to_name(src: &str) -> &str {
+	if let Some((_, name)) = src.rsplit_once('/') {
+		if let Some(pos) = name.find(".git") {
+			&name[0..pos]
+		} else {
+			name
+		}
+	} else {
+		src
+	}
+}
+
 fn main() {
 	let args: Vec<_> = std::env::args().skip(1).collect();
 
@@ -595,26 +626,7 @@ fn main() {
 				}
 
 				let path = sysroot.join(name);
-				match std::fs::remove_dir(&path) {
-					Ok(_) => {},
-					Err(e) => {
-						if e.kind() == std::io::ErrorKind::NotADirectory {
-							match std::fs::remove_file(&path) {
-								Ok(_) => {},
-								Err(e) => {
-									if e.kind() != std::io::ErrorKind::NotFound {
-										eprintln!("error: failed to remove {}: {}", path.display(), e);
-										exit(1);
-									}
-								}
-							}
-						} else if e.kind() != std::io::ErrorKind::NotFound &&
-							e.kind() != std::io::ErrorKind::DirectoryNotEmpty {
-							eprintln!("error: failed to remove {}: {}", path.display(), e);
-							exit(1);
-						}
-					}
-				}
+				remove_path(&path);
 			}
 
 			if let Err(e) = std::fs::remove_dir_all(&pkg_meta_dir) {
@@ -802,7 +814,7 @@ fn main() {
 			}
 		}
 
-		packages.insert(entry.name.clone(), package);
+		packages.insert(recipe.general.name.clone(), package);
 
 		let (
 			build_dir,
@@ -835,29 +847,9 @@ fn main() {
 		let archives_dir = Path::new(&state.config.general.build_root)
 			.join("archives");
 
-		match create_dir_all(&root_src_dir) {
-			Ok(_) => {},
-			Err(e) => {
-				eprintln!("error: failed to create directory {}: {}", root_src_dir.display(), e);
-				exit(1);
-			}
-		}
-
-		match create_dir_all(&archives_dir) {
-			Ok(_) => {},
-			Err(e) => {
-				eprintln!("error: failed to create directory {}: {}", archives_dir.display(), e);
-				exit(1);
-			}
-		}
-
-		match create_dir_all(&dest_dir) {
-			Ok(_) => {},
-			Err(e) => {
-				eprintln!("error: failed to create directory {}: {}", dest_dir.display(), e);
-				exit(1);
-			}
-		}
+		create_dir(&root_src_dir);
+		create_dir(&archives_dir);
+		create_dir(&dest_dir);
 
 		finalize_recipe(&mut recipe, &state, &root_src_dir, &dest_dir);
 
@@ -887,13 +879,7 @@ fn main() {
 				Path::new(&state.config.general.recipes_dir).join(&entry.name).join("patches")
 			};
 
-			match create_dir_all(&patches_dir) {
-				Ok(_) => {},
-				Err(e) => {
-					eprintln!("error: failed to create directory {}: {}", patches_dir.display(), e);
-					exit(1);
-				}
-			}
+			create_dir(&patches_dir);
 
 			let patch_file = patches_dir.join(&format!("{}.patch", gen_patch_name));
 			match write(&patch_file, output.stdout) {
@@ -908,15 +894,7 @@ fn main() {
 		}
 
 		for src in &recipe.general.src {
-			let name = if let Some((_, name)) = src.rsplit_once('/') {
-				if let Some(pos) = name.find(".git") {
-					&name[0..pos]
-				} else {
-					name
-				}
-			} else {
-				src.as_str()
-			};
+			let name = source_to_name(src);
 
 			let path = if !recipe.general.src_unpack_dir.is_empty() {
 				Path::new(&recipe.general.src_unpack_dir).to_owned().join(name)
@@ -987,7 +965,11 @@ fn main() {
 		let mut host_deps_path = String::new();
 		let mut aclocal = String::new();
 		for name in &recipe.general.host_depends {
-			let pkg = packages.get(name).expect("host dependency missing, this is a bug");
+			let pkg = if let Some(pkg) = packages.get(name) {
+				pkg
+			} else {
+				panic!("internal error: host dependency {} missing, this is a qpkg bug!", name);
+			};
 			host_deps_path += &pkg.path;
 			aclocal += &pkg.aclocal;
 		}
@@ -1016,15 +998,7 @@ fn main() {
 
 				if !recipe.general.no_auto_unpack {
 					for src in &recipe.general.src {
-						let name = if let Some((_, name)) = src.rsplit_once('/') {
-							if let Some(pos) = name.find(".git") {
-								&name[0..pos]
-							} else {
-								name
-							}
-						} else {
-							src.as_str()
-						};
+						let name = source_to_name(src);
 
 						let path = if !recipe.general.src_unpack_dir.is_empty() {
 							Path::new(&recipe.general.src_unpack_dir).to_owned().join(name)
@@ -1291,13 +1265,7 @@ fn main() {
 				let full_path = sysroot.join(path);
 
 				if file.file_type().is_dir() {
-					match create_dir_all(&full_path) {
-						Ok(_) => {},
-						Err(e) => {
-							eprintln!("error: failed to create directory {}: {}", full_path.display(), e);
-							exit(1);
-						}
-					}
+					create_dir(&full_path);
 				} else if file.file_type().is_symlink() {
 					let orig = std::fs::read_link(file.path())
 						.expect("failed to resolve symlink");
@@ -1343,35 +1311,10 @@ fn main() {
 				}
 
 				let path = sysroot.join(name);
-				match std::fs::remove_dir(&path) {
-					Ok(_) => {},
-					Err(e) => {
-						if e.kind() == std::io::ErrorKind::NotADirectory {
-							match std::fs::remove_file(&path) {
-								Ok(_) => {},
-								Err(e) => {
-									if e.kind() != std::io::ErrorKind::NotFound {
-										eprintln!("error: failed to remove {}: {}", path.display(), e);
-										exit(1);
-									}
-								}
-							}
-						} else if e.kind() != std::io::ErrorKind::NotFound &&
-							e.kind() != std::io::ErrorKind::DirectoryNotEmpty {
-							eprintln!("error: failed to remove {}: {}", path.display(), e);
-							exit(1);
-						}
-					}
-				}
+				remove_path(&path);
 			}
 
-			match create_dir_all(&pkg_meta_dir) {
-				Ok(_) => {},
-				Err(e) => {
-					eprintln!("error: failed to create directory {}: {}", pkg_meta_dir.display(), e);
-					exit(1);
-				}
-			}
+			create_dir(&pkg_meta_dir);
 
 			match write(pkg_meta_dir.join("FILES"), files) {
 				Ok(_) => {}

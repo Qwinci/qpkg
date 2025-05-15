@@ -6,7 +6,7 @@ mod template;
 use std::collections::HashMap;
 use std::fs::{create_dir_all, read_to_string, write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 use aho_corasick::AhoCorasick;
 use serde::Deserialize;
@@ -113,15 +113,22 @@ args:
 
 fn load_config(path: String) -> (Config, String) {
 	let finalize_config = |mut config: Config, path: &str| {
-		if matches!(config.general.build_root.as_str(), "" | ".") {
-			let abs = std::path::absolute(path)
-				.expect("failed to get absolute config path");
-			config.general.build_root = abs.parent().unwrap().to_str().unwrap().to_string();
-		}
+		let abs = std::path::absolute(path)
+			.expect("failed to get absolute config path");
+		let config_parent_dir = abs.parent().unwrap();
 
-		let abs = std::path::absolute(&config.general.build_root)
-			.expect("failed to get absolute build root path");
-		config.general.build_root = abs.to_str().unwrap().to_string();
+		let make_abs = |path: &mut String| {
+			let actual_path = Path::new(path);
+			if actual_path.is_relative() {
+				*path = config_parent_dir.join(path.as_str()).to_str().unwrap().to_string();
+			}
+		};
+
+		make_abs(&mut config.general.sysroot);
+		make_abs(&mut config.general.recipes_dir);
+		make_abs(&mut config.general.host_recipes_dir);
+		make_abs(&mut config.general.meta_dir);
+		make_abs(&mut config.general.build_root);
 
 		(config, path.to_string())
 	};
@@ -220,13 +227,15 @@ fn load_recipe(config: &Config, name: &str, host: bool) -> build::Recipe {
 
 struct State {
 	config: Config,
+	config_parent_dir: PathBuf,
 	templates: HashMap<String, Template>
 }
 
 impl State {
-	fn new(config: Config, templates: HashMap<String, Template>) -> Self {
+	fn new(config: Config, config_parent_dir: PathBuf, templates: HashMap<String, Template>) -> Self {
 		Self {
 			config,
+			config_parent_dir,
 			templates
 		}
 	}
@@ -300,6 +309,11 @@ fn finalize_recipe(
 	recipe.general.workdir = recipe.general.workdir.replace("@VERSION@", recipe.general.version.as_str());
 
 	let src_dir = if !recipe.general.src_unpack_dir.is_empty() {
+		let path = Path::new(&recipe.general.src_unpack_dir);
+		if path.is_relative() {
+			recipe.general.src_unpack_dir = state.config_parent_dir.join(path).to_str().unwrap().to_string();
+		}
+
 		std::path::absolute(Path::new(&recipe.general.src_unpack_dir).join(&recipe.general.workdir))
 	} else {
 		std::path::absolute(root_src_dir.join(&recipe.general.workdir))
@@ -592,7 +606,10 @@ fn main() {
 			.unwrap_or(1);
 	}
 
-	let state = State::new(config, templates);
+	let state = State::new(
+		config,
+		Path::new(&config_path).parent().unwrap().to_path_buf(),
+		templates);
 
 	let meta_dir = state.config.general.meta_dir.clone();
 	let meta_dir = Path::new(&meta_dir);
@@ -908,7 +925,7 @@ fn main() {
 			let name = source_to_name(src);
 
 			let path = if !recipe.general.src_unpack_dir.is_empty() {
-				Path::new(&recipe.general.src_unpack_dir).to_owned().join(name)
+				Path::new(&recipe.general.src_unpack_dir).join(name)
 			} else {
 				archives_dir.join(name)
 			};

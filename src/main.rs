@@ -741,24 +741,20 @@ fn main() {
 	}
 
 	let mut packages = HashMap::new();
+	let mut host_packages = HashMap::new();
 
 	while let Some(entry) = stack.pop() {
-		if packages.contains_key(&entry.name) {
-			continue;
+		if entry.host {
+			if host_packages.contains_key(&entry.name) {
+				continue;
+			}
+		} else {
+			if packages.contains_key(&entry.name) {
+				continue;
+			}
 		}
 
 		let mut recipe = load_recipe(&state.config, &entry.name, entry.host);
-
-		if !entry.processed {
-			stack.push(Entry { name: entry.name, processed: true, host: entry.host, user_specified: entry.user_specified });
-			for dep in &recipe.general.depends {
-				stack.push(Entry { name: dep.clone(), processed: false, host: false, user_specified: false });
-			}
-			for dep in &recipe.general.host_depends {
-				stack.push(Entry { name: dep.clone(), processed: false, host: true, user_specified: false });
-			}
-			continue;
-		}
 
 		if state.config.general.prefer_binaries && !recipe.general.binary_alternative.is_empty() {
 			stack.push(Entry {
@@ -814,8 +810,6 @@ fn main() {
 			}
 		}
 
-		packages.insert(recipe.general.name.clone(), package);
-
 		let (
 			build_dir,
 			dest_dir,
@@ -852,6 +846,23 @@ fn main() {
 		create_dir(&dest_dir);
 
 		finalize_recipe(&mut recipe, &state, &root_src_dir, &dest_dir);
+
+		if !entry.processed {
+			stack.push(Entry { name: entry.name, processed: true, host: entry.host, user_specified: entry.user_specified });
+			for dep in &recipe.general.depends {
+				stack.push(Entry { name: dep.clone(), processed: false, host: false, user_specified: false });
+			}
+			for dep in &recipe.general.host_depends {
+				stack.push(Entry { name: dep.clone(), processed: false, host: true, user_specified: false });
+			}
+			continue;
+		}
+
+		if entry.host {
+			host_packages.insert(recipe.general.name.clone(), package);
+		} else {
+			packages.insert(recipe.general.name.clone(), package);
+		}
 
 		let work_dir = std::path::absolute(root_src_dir.join(&recipe.general.workdir))
 			.expect("failed to get absolute srcdir");
@@ -965,7 +976,7 @@ fn main() {
 		let mut host_deps_path = String::new();
 		let mut aclocal = String::new();
 		for name in &recipe.general.host_depends {
-			let pkg = if let Some(pkg) = packages.get(name) {
+			let pkg = if let Some(pkg) = host_packages.get(name) {
 				pkg
 			} else {
 				panic!("internal error: host dependency {} missing, this is a qpkg bug!", name);
